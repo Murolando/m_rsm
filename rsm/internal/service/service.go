@@ -1,6 +1,6 @@
 package service
 
-import "github.com/Murolando/m_rsm/internal/entitites"
+import "github.com/Murolando/m_rsm/internal/entities"
 
 type Service struct {
 

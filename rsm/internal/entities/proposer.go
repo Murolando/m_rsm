@@ -8,9 +8,8 @@ import (
 )
 
 const (
-	DefaultValue = "DEFAULT_VALUE"
-	FalsePromise = "FALSE_PROMISE"
-
+	FalsePromise               = "FALSE_PROMISE"
+	DefaultValue               = "DEFAULT_VALUE"
 	ProposerWaiterExpiredError = "proposer Waiter Exipered"
 	FailedToProposeNewValue    = "failed to propose new value"
 )
@@ -25,12 +24,12 @@ type Proposer struct {
 	ProposerID int
 	// mutex
 	Mu sync.Mutex
-	// Последни принятый номер
+	// Last ballot number
 	LastBallotNumber *BallotNumber
-	// Список асепторов
+	// Acceptors
 	acceptors []*Acceptor
 
-	// Таймер ожидания сбора кворума
+	// Quorum timer
 	waitTimer time.Duration
 }
 
@@ -63,9 +62,11 @@ func (p *Proposer) ProposeValue(message string) ([]Log, error) {
 	// generate new ballot number
 	p.GenerateNewBallotNumber()
 	pNum := *p.LastBallotNumber
+
 	prepareMessage := PrepareMessage{
 		ProposerBallotNumber: &pNum,
 	}
+
 	// prepare
 	promises, promise, err := p.Prepare(&prepareMessage)
 	if err != nil {
@@ -75,13 +76,13 @@ func (p *Proposer) ProposeValue(message string) ([]Log, error) {
 		p.LastBallotNumber.Number = promises[0].MaxPromissedBallotNumber.Number
 		return nil, errors.New(FailedToProposeNewValue)
 	}
-	// перебираю все логи и по размеру максимального строю новый лог
-	// также для каждой ячейки определеяю значение
+
 	value := &Log{
 		LastAcceptedBallotNumber: p.LastBallotNumber,
 		LastAcceptedValue:        message,
 	}
 	newLog := mergeLists(promises, *p.LastBallotNumber, value)
+
 	// propose
 	proposeMessage := ProposeMessage{
 		NewAcceptedBallotNumber: &pNum,
@@ -100,18 +101,20 @@ func (p *Proposer) ProposeValue(message string) ([]Log, error) {
 }
 
 func (p *Proposer) Prepare(prepareMessage *PrepareMessage) ([]*PromiseMessage, bool, error) {
-
 	result := make([]*PromiseMessage, 0)
-	// Беру сообщение и асинхронно рассылаю между acceptors
+	var resultMu sync.Mutex
+
+	// Get message from acceptors and parallelly send message to acceptors
 	for _, a := range p.acceptors {
 		go func() {
 			r := a.Promise(prepareMessage)
-			p.Mu.Lock()
+			resultMu.Lock()
 			result = append(result, r)
-			p.Mu.Unlock()
+			resultMu.Unlock()
 		}()
 	}
-	// Жду время и проверяю кворум, если его нет или он ложный возвращаю ошибку
+
+	// Wait time and check quorum, if it is not there or it is false return error
 	time.Sleep(p.waitTimer * time.Second)
 
 	p.Mu.Lock()
@@ -131,30 +134,31 @@ func (p *Proposer) Prepare(prepareMessage *PrepareMessage) ([]*PromiseMessage, b
 }
 
 func (p *Proposer) Propose(proposeMessage *ProposeMessage) ([]*AcceptedMessage, bool, error) {
-	// Беру сообщение и асинхронно рассылаю между acceptors
 	result := make([]*AcceptedMessage, 0)
-	// Беру сообщение и асинхронно рассылаю между acceptors
+	var resultMu sync.Mutex
+
+	// Get message from acceptors and parallelly send message to acceptors
 	for _, a := range p.acceptors {
 		go func() {
 			r := a.Accept(proposeMessage)
-			p.Mu.Lock()
+			resultMu.Lock()
 			result = append(result, r)
-			p.Mu.Unlock()
+			resultMu.Unlock()
 		}()
 	}
-	// Жду время и проверяю кворум, если его нет или он ложный возвращаю ошибку
+	// Wait time and check quorum, if it is not there or it is false return error
 	time.Sleep(p.waitTimer * time.Second)
 	p.Mu.Lock()
+	defer p.Mu.Unlock()
 	if len(result) < len(p.acceptors)/2+1 {
 		return result, false, errors.New(ProposerWaiterExpiredError)
 	}
 	for _, accept := range result {
-		if accept.NewAcceptedBallotNumber != proposeMessage.NewAcceptedBallotNumber {
+		if *accept.NewAcceptedBallotNumber != *proposeMessage.NewAcceptedBallotNumber {
 			result = []*AcceptedMessage{accept}
 			return result, false, nil
 		}
 	}
-	p.Mu.Unlock()
 
 	return result, true, nil
 }
@@ -169,7 +173,7 @@ func mergeLists(promises []*PromiseMessage, proposerNumber BallotNumber, propose
 
 	result := make([]Log, maxLength)
 	added := false
-	for i := 0; i < maxLength; i++ {
+	for i := range maxLength {
 		var currentMax *Log
 		for _, promise := range promises {
 			if i < len(promise.Logs) {

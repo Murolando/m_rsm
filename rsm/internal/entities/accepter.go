@@ -13,9 +13,8 @@ type Acceptor struct {
 	Mu sync.Mutex
 	// n_promissed
 	MaxPromissedBallotNumber *BallotNumber
-	// (n_accepted,v_accepted)
+	// (n_accepted)
 	LastAcceptedBallotNumber *BallotNumber
-	LastAcceptedValue        string
 	// logs
 	Logs []Log
 }
@@ -26,7 +25,6 @@ func NewAcceptor(acceptorID int) *Acceptor {
 		Mu:                       sync.Mutex{},
 		MaxPromissedBallotNumber: &BallotNumber{},
 		LastAcceptedBallotNumber: &BallotNumber{},
-		LastAcceptedValue:        DefaultValue,
 		Logs:                     make([]Log, 0),
 	}
 }

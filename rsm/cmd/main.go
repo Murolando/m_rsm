@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/Murolando/m_rsm/internal/entitites"
+	"github.com/Murolando/m_rsm/internal/entities"
 	"github.com/Murolando/m_rsm/internal/service"
 )
 
@@ -25,7 +25,7 @@ func main() {
 	service := service.New(proposers)
 
 	wg := sync.WaitGroup{}
-	
+
 	wg.Add(2)
 	go func() {
 		service.ProposeValue(0, "murolando")
@@ -36,20 +36,19 @@ func main() {
 		wg.Done()
 	}()
 	wg.Wait()
-	
 
-	// wg.Add(3)
-	// go func() {
-	// 	service.ProposeValue(0, "alexyB")
-	// 	wg.Done()
-	// }()
-	// go func() {
-	// 	service.ProposeValue(1, "oleg")
-	// 	wg.Done()
-	// }()
-	// go func() {
-	// 	service.ProposeValue(1, "joomba")
-	// 	wg.Done()
-	// }()
-	// wg.Wait()
+	wg.Add(3)
+	go func() {
+		service.ProposeValue(0, "alexyB")
+		wg.Done()
+	}()
+	go func() {
+		service.ProposeValue(1, "oleg")
+		wg.Done()
+	}()
+	go func() {
+		service.ProposeValue(1, "joomba")
+		wg.Done()
+	}()
+	wg.Wait()
 }

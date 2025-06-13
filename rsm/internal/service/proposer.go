@@ -3,7 +3,7 @@ package service
 import (
 	"log"
 
-	"github.com/Murolando/m_rsm/internal/entitites"
+	"github.com/Murolando/m_rsm/internal/entities"
 )
 
 type ServiceProposer struct {
