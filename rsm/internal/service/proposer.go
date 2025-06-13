@@ -1,7 +1,7 @@
 package service
 
 import (
-	"fmt"
+	"log"
 
 	"github.com/Murolando/m_rsm/internal/entitites"
 )
@@ -10,14 +10,15 @@ type ServiceProposer struct {
 	proposers []*entitites.Proposer
 }
 
-func (s *ServiceProposer) ProposeValue(value string, proposerID int) bool {
-	fmt.Println("Service")
+func (s *ServiceProposer) ProposeValue(proposerID int, value string) {
 	for i := range 5 {
-		fmt.Println("Iteration:", i+1)
-		if res := s.proposers[proposerID].ProposeValue(value); res {
-			return res
+		log.Println(i, proposerID, value)
+		lg, err := s.proposers[proposerID].ProposeValue(value)
+		if err != nil {
+			log.Println(err, value)
+			continue
 		}
-		s.proposers[proposerID].GenerateNewBallotNumber()
+		log.Println(lg)
+		return
 	}
-	return false
 }

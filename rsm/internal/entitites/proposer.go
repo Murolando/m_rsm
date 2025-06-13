@@ -1,13 +1,18 @@
 package entitites
 
 import (
-	"fmt"
+	"errors"
+	"log"
 	"sync"
+	"time"
 )
 
 const (
 	DefaultValue = "DEFAULT_VALUE"
 	FalsePromise = "FALSE_PROMISE"
+
+	ProposerWaiterExpiredError = "proposer Waiter Exipered"
+	FailedToProposeNewValue    = "failed to propose new value"
 )
 
 type BallotNumber struct {
@@ -18,17 +23,23 @@ type BallotNumber struct {
 // PROPOSER
 type Proposer struct {
 	ProposerID int
+	// mutex
+	Mu sync.Mutex
 	// Последни принятый номер
 	LastBallotNumber *BallotNumber
 	// Список асепторов
 	acceptors []*Acceptor
+
+	// Таймер ожидания сбора кворума
+	waitTimer time.Duration
 }
 
-func NewProposer(proposerID int, acceptors []*Acceptor) *Proposer {
+func NewProposer(proposerID int, acceptors []*Acceptor, waitTimer time.Duration) *Proposer {
 	return &Proposer{
 		ProposerID:       proposerID,
 		LastBallotNumber: &BallotNumber{},
 		acceptors:        acceptors,
+		waitTimer:        waitTimer,
 	}
 }
 
@@ -39,104 +50,145 @@ type PrepareMessage struct {
 
 type ProposeMessage struct {
 	// (n_accepted,v_accepted)
-	NewAcceptedBallotNumer *BallotNumber
-	NewAcceptedValue       string
+	NewAcceptedBallotNumber *BallotNumber
+	// log
+	NewAcceptedLog []Log
 }
 
 func (p *Proposer) GenerateNewBallotNumber() {
 	p.LastBallotNumber.Number += 1
 }
 
-func (p *Proposer) ProposeValue(value string) bool {
-	fmt.Println("Phase 1")
-	// Phase 1
-	// Prepare
-	// generate ballot number
+func (p *Proposer) ProposeValue(message string) ([]Log, error) {
+	// generate new ballot number
 	p.GenerateNewBallotNumber()
-	// prepare message
-	prepareMessage := &PrepareMessage{
-		ProposerBallotNumber: p.LastBallotNumber,
+	pNum := *p.LastBallotNumber
+	prepareMessage := PrepareMessage{
+		ProposerBallotNumber: &pNum,
 	}
 	// prepare
-	fmt.Println("Phase 1, Prepare")
-	promises := p.Prepare(prepareMessage)
-	// check quorum
-	if promises == nil || len(promises) < len(p.acceptors)/2+1 {
-		return false
+	promises, promise, err := p.Prepare(&prepareMessage)
+	if err != nil {
+		return nil, err
 	}
-	fmt.Println("Phase 1, Choose", fmt.Sprintln(promises))
-	// choose value
-	proposeMessage := &ProposeMessage{
-		NewAcceptedBallotNumer: p.LastBallotNumber,
-		NewAcceptedValue:       value,
+	if !promise {
+		p.LastBallotNumber.Number = promises[0].MaxPromissedBallotNumber.Number
+		return nil, errors.New(FailedToProposeNewValue)
 	}
+	// перебираю все логи и по размеру максимального строю новый лог
+	// также для каждой ячейки определеяю значение
+	value := &Log{
+		LastAcceptedBallotNumber: p.LastBallotNumber,
+		LastAcceptedValue:        message,
+	}
+	newLog := mergeLists(promises, *p.LastBallotNumber, value)
+	// propose
+	proposeMessage := ProposeMessage{
+		NewAcceptedBallotNumber: &pNum,
+		NewAcceptedLog:          newLog,
+	}
+	_, accept, err := p.Propose(&proposeMessage)
+	if err != nil {
+		return nil, err
+	}
+	if !accept {
+		p.LastBallotNumber.Number = promises[0].MaxPromissedBallotNumber.Number
+		return nil, errors.New(FailedToProposeNewValue)
+	}
+	log.Println(p.acceptors[0].Logs, p.acceptors[1].Logs, p.acceptors[2].Logs)
+	return p.acceptors[0].Logs, nil
+}
 
-	var number int64
-	for _, msg := range promises {
-		if msg.LastAcceptedBallotNumer.Number > number && msg.LastAcceptedValue != DefaultValue{
-			number = msg.LastAcceptedBallotNumer.Number
-			proposeMessage.NewAcceptedValue = msg.LastAcceptedValue
+func (p *Proposer) Prepare(prepareMessage *PrepareMessage) ([]*PromiseMessage, bool, error) {
+
+	result := make([]*PromiseMessage, 0)
+	// Беру сообщение и асинхронно рассылаю между acceptors
+	for _, a := range p.acceptors {
+		go func() {
+			r := a.Promise(prepareMessage)
+			p.Mu.Lock()
+			result = append(result, r)
+			p.Mu.Unlock()
+		}()
+	}
+	// Жду время и проверяю кворум, если его нет или он ложный возвращаю ошибку
+	time.Sleep(p.waitTimer * time.Second)
+
+	p.Mu.Lock()
+	defer p.Mu.Unlock()
+
+	if len(result) < len(p.acceptors)/2+1 {
+		return result, false, errors.New(ProposerWaiterExpiredError)
+	}
+	for _, promise := range result {
+		if !promise.Promise {
+			result = []*PromiseMessage{promise}
+			return result, false, nil
 		}
 	}
-	fmt.Println("Phase 2")
-	// Phase 2
 
-	// Propose
-	fmt.Println("Phase 2, Propose")
-	acceptedMessages := p.Propose(proposeMessage)
-	if acceptedMessages == nil || len(acceptedMessages) < len(p.acceptors)/2+1 {
-		fmt.Println("CONSESUS NOT FOUND", p.ProposerID, proposeMessage.NewAcceptedValue)
-		return false
-	}
-	fmt.Println("CONSENSUS!", p.ProposerID, proposeMessage.NewAcceptedValue)
-	return true
+	return result, true, nil
 }
 
-func (p *Proposer) Prepare(prepareMessage *PrepareMessage) []*PromiseMessage {
-	quorumMu := sync.Mutex{}
-	promises := make([]*PromiseMessage, 0, len(p.acceptors))
-
-	for i, acceptor := range p.acceptors {
-		fmt.Println("Phase 1, Prepare, Promise", i, acceptor)
+func (p *Proposer) Propose(proposeMessage *ProposeMessage) ([]*AcceptedMessage, bool, error) {
+	// Беру сообщение и асинхронно рассылаю между acceptors
+	result := make([]*AcceptedMessage, 0)
+	// Беру сообщение и асинхронно рассылаю между acceptors
+	for _, a := range p.acceptors {
 		go func() {
-			msg := acceptor.Promise(prepareMessage)
-			if msg.LastAcceptedValue != FalsePromise {
-				fmt.Println("Phase 1", i, msg)
-				quorumMu.Lock()
-				promises = append(promises, msg)
-				quorumMu.Unlock()
-			}
+			r := a.Accept(proposeMessage)
+			p.Mu.Lock()
+			result = append(result, r)
+			p.Mu.Unlock()
 		}()
 	}
-	Wait()
-	Wait()
-	fmt.Println("Phase 1, Prepare, Check", promises)
-	if len(promises) >= len(p.acceptors)/2+1 {
-		return promises
+	// Жду время и проверяю кворум, если его нет или он ложный возвращаю ошибку
+	time.Sleep(p.waitTimer * time.Second)
+	p.Mu.Lock()
+	if len(result) < len(p.acceptors)/2+1 {
+		return result, false, errors.New(ProposerWaiterExpiredError)
 	}
-	return nil
+	for _, accept := range result {
+		if accept.NewAcceptedBallotNumber != proposeMessage.NewAcceptedBallotNumber {
+			result = []*AcceptedMessage{accept}
+			return result, false, nil
+		}
+	}
+	p.Mu.Unlock()
+
+	return result, true, nil
 }
-func (p *Proposer) Propose(proposeMessage *ProposeMessage) []*AcceptedMessage {
-	quorumMu := sync.Mutex{}
-	acceptedMessages := make([]*AcceptedMessage, 0, len(p.acceptors))
 
-	for i, acceptor := range p.acceptors {
-		go func() {
-			fmt.Println("Phase 2, Propose, Accept", i, acceptor, acceptor.MaxPromissedBallotNumer, proposeMessage.NewAcceptedValue)
-			msg := acceptor.Accept(proposeMessage)
-			if msg.NewAcceptedBallotNumer != nil {
-				fmt.Println("Phase 2", i, msg)
-				quorumMu.Lock()
-				acceptedMessages = append(acceptedMessages, msg)
-				quorumMu.Unlock()
+func mergeLists(promises []*PromiseMessage, proposerNumber BallotNumber, proposedValue *Log) []Log {
+	maxLength := 0
+	for _, promise := range promises {
+		if len(promise.Logs) > maxLength {
+			maxLength = len(promise.Logs)
+		}
+	}
+
+	result := make([]Log, maxLength)
+	added := false
+	for i := 0; i < maxLength; i++ {
+		var currentMax *Log
+		for _, promise := range promises {
+			if i < len(promise.Logs) {
+				if currentMax == nil || promise.Logs[i].LastAcceptedBallotNumber.Number > currentMax.LastAcceptedBallotNumber.Number {
+					currentMax = &promise.Logs[i]
+				}
 			}
-		}()
+		}
+		if currentMax != nil {
+			*currentMax.LastAcceptedBallotNumber = proposerNumber
+		} else {
+			currentMax = proposedValue
+			added = true
+		}
+		result[i] = *currentMax
 	}
-	Wait()
-	Wait()
-	fmt.Println("Phase 2, Propose, check", acceptedMessages)
-	if len(acceptedMessages) >= len(p.acceptors)/2+1 {
-		return acceptedMessages
+	if !added {
+		result = append(result, *proposedValue)
 	}
-	return nil
+
+	return result
 }
